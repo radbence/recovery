@@ -11,6 +11,8 @@ import argparse
 import shutil
 from pathlib import Path
 
+from path_config import DEFAULT_CONFIG_PATH, load_config_section
+
 
 CATEGORY_MAP = {
     "images": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".heic", ".svg"},
@@ -47,11 +49,18 @@ def unique_destination(path: Path) -> Path:
         counter += 1
 
 
-def organize(directory: Path, recursive: bool = False, dry_run: bool = False) -> None:
+def organize(
+    directory: Path,
+    recursive: bool = False,
+    dry_run: bool = False,
+    output_root: str = "",
+) -> None:
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Invalid directory: {directory}")
 
     files = directory.rglob("*") if recursive else directory.iterdir()
+
+    output_base = (directory / output_root).resolve() if output_root else directory
 
     moved = 0
     for item in files:
@@ -63,7 +72,7 @@ def organize(directory: Path, recursive: bool = False, dry_run: bool = False) ->
             continue
 
         category = category_for_extension(item.suffix)
-        target_dir = directory / category
+        target_dir = output_base / category
         target_path = unique_destination(target_dir / item.name)
 
         if dry_run:
@@ -80,6 +89,11 @@ def organize(directory: Path, recursive: bool = False, dry_run: bool = False) ->
 def main() -> None:
     parser = argparse.ArgumentParser(description="Group files by file type")
     parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Path to shared JSON config",
+    )
+    parser.add_argument(
         "directory",
         nargs="?",
         default=".",
@@ -95,9 +109,37 @@ def main() -> None:
         action="store_true",
         help="Show what would happen without moving files",
     )
+    parser.add_argument(
+        "--output-root",
+        default="",
+        help="Optional output root folder (e.g. grouped -> grouped/images)",
+    )
 
     args = parser.parse_args()
-    organize(Path(args.directory).expanduser().resolve(), recursive=args.recursive, dry_run=args.dry_run)
+    config = load_config_section(Path(args.config), "group_files_by_type")
+
+    directory = args.directory
+    if directory == "." and isinstance(config.get("directory"), str):
+        directory = str(config["directory"])
+
+    recursive = args.recursive
+    if not recursive and isinstance(config.get("recursive"), bool):
+        recursive = bool(config["recursive"])
+
+    dry_run = args.dry_run
+    if not dry_run and isinstance(config.get("dry_run"), bool):
+        dry_run = bool(config["dry_run"])
+
+    output_root = args.output_root
+    if output_root == "" and isinstance(config.get("output_root"), str):
+        output_root = str(config["output_root"])
+
+    organize(
+        Path(directory).expanduser().resolve(),
+        recursive=recursive,
+        dry_run=dry_run,
+        output_root=output_root,
+    )
 
 
 if __name__ == "__main__":

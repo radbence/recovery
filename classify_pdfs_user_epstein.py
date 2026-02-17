@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
-import io
 import json
 import re
 import shutil
@@ -28,6 +27,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+from path_config import DEFAULT_CONFIG_PATH, load_config_section
 
 
 # You can extend this list with known case-id variants.
@@ -240,6 +241,7 @@ def write_report(rows: list[tuple[str, str, str, int, str]], report_csv: Path) -
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Classify PDFs into epstein/user using bottom-right case-id detection")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to shared JSON config")
     parser.add_argument("directory", nargs="?", default=".", help="Folder containing PDFs (default: current folder)")
     parser.add_argument("--recursive", action="store_true", help="Scan PDFs in subfolders too")
     parser.add_argument("--dry-run", action="store_true", help="Preview copy actions only")
@@ -265,19 +267,49 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    input_dir = Path(args.directory).expanduser().resolve()
+    config = load_config_section(Path(args.config), "classify_pdfs_user_epstein")
+
+    directory = args.directory
+    if directory == "." and isinstance(config.get("directory"), str):
+        directory = str(config["directory"])
+
+    recursive = args.recursive
+    if not recursive and isinstance(config.get("recursive"), bool):
+        recursive = bool(config["recursive"])
+
+    dry_run = args.dry_run
+    if not dry_run and isinstance(config.get("dry_run"), bool):
+        dry_run = bool(config["dry_run"])
+
+    output_root = args.output_root
+    if output_root == "pdf" and isinstance(config.get("output_root"), str):
+        output_root = str(config["output_root"])
+
+    user_dir = args.user_dir
+    if user_dir == "user" and isinstance(config.get("user_dir"), str):
+        user_dir = str(config["user_dir"])
+
+    epstein_dir = args.epstein_dir
+    if epstein_dir == "epstein" and isinstance(config.get("epstein_dir"), str):
+        epstein_dir = str(config["epstein_dir"])
+
+    report_arg = args.report
+    if report_arg == "classification_report.csv" and isinstance(config.get("report"), str):
+        report_arg = str(config["report"])
+
+    input_dir = Path(directory).expanduser().resolve()
     if not input_dir.exists() or not input_dir.is_dir():
         raise SystemExit(f"Invalid directory: {input_dir}")
 
-    report_csv = Path(args.report)
+    report_csv = Path(report_arg)
     if not report_csv.is_absolute():
         report_csv = input_dir / report_csv
 
     cfg = Config(
         input_dir=input_dir,
-        output_root_dir_name=args.output_root,
-        epstein_dir_name=args.epstein_dir,
-        user_dir_name=args.user_dir,
+        output_root_dir_name=output_root,
+        epstein_dir_name=epstein_dir,
+        user_dir_name=user_dir,
         report_csv=report_csv,
         model=args.model,
         dpi=args.dpi,
@@ -285,8 +317,8 @@ def main() -> None:
         roi_y=args.roi_y,
         roi_w=args.roi_w,
         roi_h=args.roi_h,
-        recursive=args.recursive,
-        dry_run=args.dry_run,
+        recursive=recursive,
+        dry_run=dry_run,
         use_ocr=args.use_ocr,
         ollama_url=args.ollama_url,
         timeout_sec=args.timeout_sec,

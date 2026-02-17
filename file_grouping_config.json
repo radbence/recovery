@@ -1,0 +1,17 @@
+{
+  "group_files_by_type": {
+    "directory": "/Users/radbence/Documents/asd1",
+    "output_root": "grouped",
+    "recursive": false,
+    "dry_run": false
+  },
+  "classify_pdfs_user_epstein": {
+    "directory": "/Users/radbence/Documents/asd1",
+    "output_root": "pdf",
+    "user_dir": "user",
+    "epstein_dir": "epstein",
+    "report": "classification_report.csv",
+    "recursive": true,
+    "dry_run": false
+  }
+}
