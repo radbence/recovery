@@ -51,7 +51,6 @@ class DetectionResult:
 @dataclass
 class Config:
     input_dir: Path
-    output_root_dir_name: str
     epstein_dir_name: str
     user_dir_name: str
     report_csv: Path
@@ -140,7 +139,7 @@ def _process_one(args: tuple[Path, Config]) -> tuple[str, str, int, str, str]:
     result = detect_case_id(pdf_path, cfg)
     group = cfg.epstein_dir_name if result.is_epstein else cfg.user_dir_name
 
-    target_dir = cfg.input_dir / cfg.output_root_dir_name / group
+    target_dir = cfg.input_dir / group
     target_path = unique_destination(target_dir / pdf_path.name)
     relative_target = target_path.relative_to(cfg.input_dir)
 
@@ -201,7 +200,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("directory", nargs="?", default=".", help="Folder containing PDFs (default: current folder)")
     parser.add_argument("--recursive", action="store_true", help="Scan PDFs in subfolders too")
     parser.add_argument("--dry-run", action="store_true", help="Preview copy actions only")
-    parser.add_argument("--output-root", default="pdf", help="Root output folder for grouped PDFs (default: pdf)")
     parser.add_argument("--epstein-dir", default="epstein", help="Output folder name for epstein PDFs (default: epstein)")
     parser.add_argument("--user-dir", default="user", help="Output folder name for user PDFs (default: user)")
     parser.add_argument("--report", default="classification_report.csv", help="CSV report path (default: classification_report.csv)")
@@ -232,7 +230,6 @@ def main() -> None:
 
     cfg = Config(
         input_dir=input_dir,
-        output_root_dir_name=args.output_root,
         epstein_dir_name=args.epstein_dir,
         user_dir_name=args.user_dir,
         report_csv=report_csv,
@@ -247,7 +244,7 @@ def main() -> None:
         verbose=args.verbose,
     )
 
-    skip_parts = {cfg.output_root_dir_name, cfg.epstein_dir_name, cfg.user_dir_name}
+    skip_parts = {cfg.epstein_dir_name, cfg.user_dir_name}
     pdf_files = sorted(
         p for p in iter_pdf_files(cfg.input_dir, cfg.recursive)
         if not cfg.recursive or not skip_parts.intersection(p.parts)
