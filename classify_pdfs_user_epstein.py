@@ -21,6 +21,7 @@ import csv
 import os
 import re
 import shutil
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,7 +127,7 @@ def detect_case_id(pdf_path: Path, cfg: Config) -> DetectionResult:
     return DetectionResult(False, "", -1)
 
 
-def _process_one(args: tuple[Path, Config]) -> tuple[str, str, int, str]:
+def _process_one(args: tuple[Path, Config]) -> tuple[str, str, int, str, str]:
     """Worker function for multiprocessing: detect + copy a single PDF."""
     pdf_path, cfg = args
     result = detect_case_id(pdf_path, cfg)
@@ -137,21 +138,53 @@ def _process_one(args: tuple[Path, Config]) -> tuple[str, str, int, str]:
     relative_target = target_path.relative_to(cfg.input_dir)
 
     if cfg.dry_run:
-        print(f"[DRY RUN] {pdf_path.name} -> {relative_target}")
+        message = f"[DRY RUN] {pdf_path.name} -> {relative_target}"
     else:
         target_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(pdf_path), str(target_path))
-        print(f"Copied: {pdf_path.name} -> {relative_target}")
+        message = f"Copied: {pdf_path.name} -> {relative_target}"
 
-    return pdf_path.name, group, result.page, result.match
+    return pdf_path.name, group, result.page, result.match, message
 
 
-def write_report(rows: list[tuple[str, str, int, str]], report_csv: Path) -> None:
+def _format_eta(seconds: float) -> str:
+    """Format seconds into a human-readable ETA string."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    mins, secs = divmod(int(seconds), 60)
+    if mins < 60:
+        return f"{mins}m {secs:02d}s"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins:02d}m {secs:02d}s"
+
+
+def _print_progress(
+    done: int,
+    total: int,
+    epstein: int,
+    user: int,
+    errors: int,
+    elapsed: float,
+) -> None:
+    """Print a progress status line."""
+    remaining = total - done
+    if done > 0 and elapsed > 0:
+        eta = _format_eta(elapsed / done * remaining)
+    else:
+        eta = "calculating..."
+    print(
+        f"  [{done}/{total}] "
+        f"epstein: {epstein} | user: {user} | errors: {errors} | "
+        f"remaining: {remaining} | ETA: {eta}"
+    )
+
+
+def write_report(rows: list[tuple[str, str, int, str, str]], report_csv: Path) -> None:
     report_csv.parent.mkdir(parents=True, exist_ok=True)
     with report_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["filename", "group", "matched_page", "matched_value"])
-        writer.writerows(rows)
+        writer.writerows(row[:4] for row in rows)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -218,14 +251,33 @@ def main() -> None:
 
     print(f"Processing {len(pdf_files)} PDF(s) with {workers} worker(s)...")
 
-    rows: list[tuple[str, str, int, str]] = []
+    total = len(pdf_files)
+    epstein_count = 0
+    user_count = 0
+    error_count = 0
+    rows: list[tuple[str, str, int, str, str]] = []
+    start_time = time.monotonic()
+
     if workers == 1:
         for pdf_path in pdf_files:
             try:
-                rows.append(_process_one((pdf_path, cfg)))
+                row = _process_one((pdf_path, cfg))
+                rows.append(row)
+                print(row[4])
             except Exception as exc:
                 print(f"ERROR: {pdf_path.name}: {exc}")
-                rows.append((pdf_path.name, "error", -1, str(exc)))
+                rows.append((pdf_path.name, "error", -1, str(exc), ""))
+            group = rows[-1][1]
+            if group == cfg.epstein_dir_name:
+                epstein_count += 1
+            elif group == cfg.user_dir_name:
+                user_count += 1
+            else:
+                error_count += 1
+            _print_progress(
+                len(rows), total, epstein_count, user_count, error_count,
+                time.monotonic() - start_time,
+            )
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
@@ -235,13 +287,28 @@ def main() -> None:
             for future in as_completed(futures):
                 pdf_path = futures[future]
                 try:
-                    rows.append(future.result())
+                    row = future.result()
+                    rows.append(row)
+                    print(row[4])
                 except Exception as exc:
                     print(f"ERROR: {pdf_path.name}: {exc}")
-                    rows.append((pdf_path.name, "error", -1, str(exc)))
+                    rows.append((pdf_path.name, "error", -1, str(exc), ""))
+                group = rows[-1][1]
+                if group == cfg.epstein_dir_name:
+                    epstein_count += 1
+                elif group == cfg.user_dir_name:
+                    user_count += 1
+                else:
+                    error_count += 1
+                _print_progress(
+                    len(rows), total, epstein_count, user_count, error_count,
+                    time.monotonic() - start_time,
+                )
 
     write_report(rows, cfg.report_csv)
-    print(f"\nDone. Processed {len(rows)} PDF file(s).")
+    elapsed = time.monotonic() - start_time
+    print(f"\nDone. Processed {len(rows)} PDF file(s) in {_format_eta(elapsed)}.")
+    print(f"  epstein: {epstein_count} | user: {user_count} | errors: {error_count}")
     print(f"Report: {cfg.report_csv}")
 
 
