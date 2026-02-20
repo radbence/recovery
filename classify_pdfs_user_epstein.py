@@ -288,37 +288,49 @@ def main() -> None:
                     time.monotonic() - start_time,
                 )
         else:
-            with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init) as pool:
-                futures = {
-                    pool.submit(_process_one, (pdf_path, cfg)): pdf_path
-                    for pdf_path in pdf_files
-                }
-                try:
-                    for future in as_completed(futures):
-                        pdf_path = futures[future]
-                        try:
-                            row = future.result()
-                            rows.append(row)
-                            print(row[4])
-                        except Exception as exc:
-                            print(f"ERROR: {pdf_path.name}: {exc}")
-                            rows.append((pdf_path.name, "error", -1, str(exc), ""))
-                        group = rows[-1][1]
-                        if group == cfg.epstein_dir_name:
-                            epstein_count += 1
-                        elif group == cfg.user_dir_name:
-                            user_count += 1
-                        else:
-                            error_count += 1
-                        _print_progress(
-                            len(rows), total, epstein_count, user_count, error_count,
-                            time.monotonic() - start_time,
-                        )
-                except KeyboardInterrupt:
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    for proc in pool._processes.values():
+            pool = ProcessPoolExecutor(max_workers=workers, initializer=_worker_init)
+            futures = {
+                pool.submit(_process_one, (pdf_path, cfg)): pdf_path
+                for pdf_path in pdf_files
+            }
+            try:
+                for future in as_completed(futures):
+                    pdf_path = futures[future]
+                    try:
+                        row = future.result()
+                        rows.append(row)
+                        print(row[4])
+                    except Exception as exc:
+                        print(f"ERROR: {pdf_path.name}: {exc}")
+                        rows.append((pdf_path.name, "error", -1, str(exc), ""))
+                    group = rows[-1][1]
+                    if group == cfg.epstein_dir_name:
+                        epstein_count += 1
+                    elif group == cfg.user_dir_name:
+                        user_count += 1
+                    else:
+                        error_count += 1
+                    _print_progress(
+                        len(rows), total, epstein_count, user_count, error_count,
+                        time.monotonic() - start_time,
+                    )
+                pool.shutdown(wait=True)
+            except KeyboardInterrupt:
+                for f in futures:
+                    f.cancel()
+                procs = list(pool._processes.values())
+                pool.shutdown(wait=False, cancel_futures=True)
+                for proc in procs:
+                    try:
                         proc.kill()
-                    raise
+                    except OSError:
+                        pass
+                for proc in procs:
+                    proc.join(timeout=5)
+                raise
+            except Exception:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
     except KeyboardInterrupt:
         interrupted = True
         elapsed = time.monotonic() - start_time
