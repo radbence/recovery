@@ -15,6 +15,7 @@ Classifies PDFs into **epstein** or **user** groups by detecting case IDs (e.g. 
 - CSV report generation (`classification_report.csv`)
 - Recursive directory scanning
 - First-page-only mode for faster processing
+- Graceful Ctrl+C handling — all workers are stopped immediately
 
 ### `group_files_by_type.py`
 
