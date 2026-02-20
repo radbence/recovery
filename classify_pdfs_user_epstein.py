@@ -21,6 +21,7 @@ import csv
 import os
 import re
 import shutil
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -257,37 +258,13 @@ def main() -> None:
     error_count = 0
     rows: list[tuple[str, str, int, str, str]] = []
     start_time = time.monotonic()
+    interrupted = False
 
-    if workers == 1:
-        for pdf_path in pdf_files:
-            try:
-                row = _process_one((pdf_path, cfg))
-                rows.append(row)
-                print(row[4])
-            except Exception as exc:
-                print(f"ERROR: {pdf_path.name}: {exc}")
-                rows.append((pdf_path.name, "error", -1, str(exc), ""))
-            group = rows[-1][1]
-            if group == cfg.epstein_dir_name:
-                epstein_count += 1
-            elif group == cfg.user_dir_name:
-                user_count += 1
-            else:
-                error_count += 1
-            _print_progress(
-                len(rows), total, epstein_count, user_count, error_count,
-                time.monotonic() - start_time,
-            )
-    else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(_process_one, (pdf_path, cfg)): pdf_path
-                for pdf_path in pdf_files
-            }
-            for future in as_completed(futures):
-                pdf_path = futures[future]
+    try:
+        if workers == 1:
+            for pdf_path in pdf_files:
                 try:
-                    row = future.result()
+                    row = _process_one((pdf_path, cfg))
                     rows.append(row)
                     print(row[4])
                 except Exception as exc:
@@ -304,8 +281,50 @@ def main() -> None:
                     len(rows), total, epstein_count, user_count, error_count,
                     time.monotonic() - start_time,
                 )
+        else:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(_process_one, (pdf_path, cfg)): pdf_path
+                    for pdf_path in pdf_files
+                }
+                try:
+                    for future in as_completed(futures):
+                        pdf_path = futures[future]
+                        try:
+                            row = future.result()
+                            rows.append(row)
+                            print(row[4])
+                        except Exception as exc:
+                            print(f"ERROR: {pdf_path.name}: {exc}")
+                            rows.append((pdf_path.name, "error", -1, str(exc), ""))
+                        group = rows[-1][1]
+                        if group == cfg.epstein_dir_name:
+                            epstein_count += 1
+                        elif group == cfg.user_dir_name:
+                            user_count += 1
+                        else:
+                            error_count += 1
+                        _print_progress(
+                            len(rows), total, epstein_count, user_count, error_count,
+                            time.monotonic() - start_time,
+                        )
+                except KeyboardInterrupt:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
+    except KeyboardInterrupt:
+        interrupted = True
+        elapsed = time.monotonic() - start_time
+        print(f"\n\nInterrupted. Processed {len(rows)}/{total} PDF(s) in {_format_eta(elapsed)}.")
+        print(f"  epstein: {epstein_count} | user: {user_count} | errors: {error_count}")
 
-    write_report(rows, cfg.report_csv)
+    if rows:
+        write_report(rows, cfg.report_csv)
+        if interrupted:
+            print(f"Partial report: {cfg.report_csv}")
+
+    if interrupted:
+        sys.exit(130)
+
     elapsed = time.monotonic() - start_time
     print(f"\nDone. Processed {len(rows)} PDF file(s) in {_format_eta(elapsed)}.")
     print(f"  epstein: {epstein_count} | user: {user_count} | errors: {error_count}")
