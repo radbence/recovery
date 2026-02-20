@@ -60,6 +60,7 @@ class Config:
     dry_run: bool
     first_page_only: bool
     workers: int
+    gpu: bool
 
 
 def unique_destination(path: Path) -> Path:
@@ -86,6 +87,42 @@ def find_case_id(text: str) -> str:
     return m.group(0) if m else ""
 
 
+_ocr_reader = None
+
+
+def _get_ocr_reader(gpu: bool):
+    """Lazily initialise an EasyOCR reader (one per process)."""
+    global _ocr_reader
+    if _ocr_reader is None:
+        try:
+            import easyocr  # type: ignore[import-untyped]
+        except ImportError:
+            raise ImportError(
+                "easyocr is required for --gpu mode. "
+                "Install with: pip install -r requirements_gpu.txt"
+            )
+        _ocr_reader = easyocr.Reader(["en"], gpu=gpu)
+    return _ocr_reader
+
+
+def _ocr_roi(page, roi_rect, gpu: bool) -> str:
+    """Render a page ROI to a bitmap and run OCR on the GPU."""
+    import fitz  # noqa: F811
+    import numpy as np
+
+    mat = fitz.Matrix(2, 2)  # 2× zoom for better OCR accuracy
+    pix = page.get_pixmap(matrix=mat, clip=roi_rect)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+        pix.h, pix.w, pix.n,
+    )
+    if pix.n == 4:  # RGBA → RGB
+        img = img[:, :, :3]
+
+    reader = _get_ocr_reader(gpu)
+    results = reader.readtext(img, detail=0)
+    return " ".join(results)
+
+
 def detect_case_id(pdf_path: Path, cfg: Config) -> DetectionResult:
     """Detect case-id via text-layer extraction. Stops at first match."""
     import fitz  # PyMuPDF  (lazy import; cached after first call)
@@ -109,6 +146,13 @@ def detect_case_id(pdf_path: Path, cfg: Config) -> DetectionResult:
             case_id = find_case_id(text)
             if case_id:
                 return DetectionResult(True, case_id, page_index + 1)
+
+            # GPU OCR fallback when text layer yields no match.
+            if cfg.gpu:
+                ocr_text = _ocr_roi(page, roi, gpu=True)
+                case_id = find_case_id(ocr_text)
+                if case_id:
+                    return DetectionResult(True, case_id, page_index + 1)
 
     return DetectionResult(False, "", -1)
 
@@ -157,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-w", type=float, default=0.48, help="Bottom-right ROI width ratio (0-1)")
     parser.add_argument("--roi-h", type=float, default=0.30, help="Bottom-right ROI height ratio (0-1)")
     parser.add_argument("--first-page-only", action="store_true", help="Only check the first page of each PDF (faster)")
+    parser.add_argument("--gpu", action="store_true", help="Enable GPU-accelerated OCR fallback (requires CUDA GPU and easyocr)")
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers (default: 1, use 0 for all CPUs)")
     return parser
 
@@ -176,6 +221,22 @@ def main() -> None:
     if workers == 0:
         workers = os.cpu_count() or 1
 
+    if args.gpu:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                print(f"GPU mode enabled: {torch.cuda.get_device_name(0)}")
+            else:
+                print("Warning: CUDA not available. OCR will run on CPU.")
+        except ImportError:
+            raise SystemExit(
+                "GPU mode requires PyTorch and easyocr. "
+                "Install with: pip install -r requirements_gpu.txt"
+            )
+        if workers > 1:
+            print("Note: GPU mode uses 1 worker (the GPU handles parallelism).")
+            workers = 1
+
     cfg = Config(
         input_dir=input_dir,
         output_root_dir_name=args.output_root,
@@ -190,6 +251,7 @@ def main() -> None:
         dry_run=args.dry_run,
         first_page_only=args.first_page_only,
         workers=workers,
+        gpu=args.gpu,
     )
 
     skip_parts = {cfg.output_root_dir_name, cfg.epstein_dir_name, cfg.user_dir_name}
