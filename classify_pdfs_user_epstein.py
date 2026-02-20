@@ -91,7 +91,7 @@ _ocr_reader = None
 
 
 def _get_ocr_reader(gpu: bool):
-    """Lazily initialise an EasyOCR reader (one per process)."""
+    """Lazily initialize an EasyOCR reader (one per process)."""
     global _ocr_reader
     if _ocr_reader is None:
         try:
@@ -149,7 +149,7 @@ def detect_case_id(pdf_path: Path, cfg: Config) -> DetectionResult:
 
             # GPU OCR fallback when text layer yields no match.
             if cfg.gpu:
-                ocr_text = _ocr_roi(page, roi, gpu=True)
+                ocr_text = _ocr_roi(page, roi, gpu=cfg.gpu)
                 case_id = find_case_id(ocr_text)
                 if case_id:
                     return DetectionResult(True, case_id, page_index + 1)
