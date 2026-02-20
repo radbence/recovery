@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import time
-from collections import Counter
 from pathlib import Path
 
 CATEGORY_MAP: dict[str, set[str]] = {
@@ -49,17 +47,6 @@ def unique_destination(path: Path) -> Path:
         counter += 1
 
 
-def _format_eta(seconds: float) -> str:
-    """Format seconds into a human-readable ETA string."""
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    mins, secs = divmod(int(seconds), 60)
-    if mins < 60:
-        return f"{mins}m {secs:02d}s"
-    hours, mins = divmod(mins, 60)
-    return f"{hours}h {mins:02d}m {secs:02d}s"
-
-
 def organize(
     directory: Path,
     recursive: bool = False,
@@ -69,25 +56,17 @@ def organize(
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Invalid directory: {directory}")
 
-    items = directory.rglob("*") if recursive else directory.iterdir()
+    files = directory.rglob("*") if recursive else directory.iterdir()
     output_base = (directory / output_root).resolve() if output_root else directory
 
-    # Collect files upfront so we know the total for progress display.
-    files = [
-        item for item in items
-        if item.is_file() and item.resolve() != Path(__file__).resolve()
-    ]
-    total = len(files)
-    if total == 0:
-        print("No files found.")
-        return
+    moved = 0
+    for item in files:
+        if not item.is_file():
+            continue
+        # Avoid moving this script while it is running.
+        if item.resolve() == Path(__file__).resolve():
+            continue
 
-    print(f"Processing {total} file(s)...")
-
-    counts: Counter[str] = Counter()
-    start_time = time.monotonic()
-
-    for done, item in enumerate(files, 1):
         category = category_for_extension(item.suffix)
         target_dir = output_base / category
         target_path = unique_destination(target_dir / item.name)
@@ -98,21 +77,9 @@ def organize(
             target_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(item), str(target_path))
             print(f"Copied: {item.name} -> {category}/{target_path.name}")
-        counts[category] += 1
+        moved += 1
 
-        elapsed = time.monotonic() - start_time
-        remaining = total - done
-        if elapsed > 0:
-            eta = _format_eta(elapsed / done * remaining)
-        else:
-            eta = "calculating..."
-        cat_summary = " | ".join(f"{cat}: {n}" for cat, n in sorted(counts.items()))
-        print(f"  [{done}/{total}] {cat_summary} | remaining: {remaining} | ETA: {eta}")
-
-    elapsed = time.monotonic() - start_time
-    cat_summary = " | ".join(f"{cat}: {n}" for cat, n in sorted(counts.items()))
-    print(f"\nDone. Processed {total} file(s) in {_format_eta(elapsed)}.")
-    print(f"  {cat_summary}")
+    print(f"\nDone. Processed {moved} file(s).")
 
 
 def main() -> None:
