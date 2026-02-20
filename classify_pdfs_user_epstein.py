@@ -20,6 +20,7 @@ import argparse
 import csv
 import os
 import re
+import signal
 import shutil
 import sys
 import time
@@ -126,6 +127,11 @@ def detect_case_id(pdf_path: Path, cfg: Config) -> DetectionResult:
             fitz.TOOLS.mupdf_display_errors(True)
 
     return DetectionResult(False, "", -1)
+
+
+def _worker_init() -> None:
+    """Ignore SIGINT in workers so the parent process handles graceful shutdown."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 def _process_one(args: tuple[Path, Config]) -> tuple[str, str, int, str, str]:
@@ -282,7 +288,7 @@ def main() -> None:
                     time.monotonic() - start_time,
                 )
         else:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
+            with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init) as pool:
                 futures = {
                     pool.submit(_process_one, (pdf_path, cfg)): pdf_path
                     for pdf_path in pdf_files
@@ -310,6 +316,8 @@ def main() -> None:
                         )
                 except KeyboardInterrupt:
                     pool.shutdown(wait=False, cancel_futures=True)
+                    for proc in pool._processes.values():
+                        proc.kill()
                     raise
     except KeyboardInterrupt:
         interrupted = True
