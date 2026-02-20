@@ -60,6 +60,7 @@ class Config:
     dry_run: bool
     first_page_only: bool
     workers: int
+    verbose: bool
 
 
 def unique_destination(path: Path) -> Path:
@@ -90,25 +91,37 @@ def detect_case_id(pdf_path: Path, cfg: Config) -> DetectionResult:
     """Detect case-id via text-layer extraction. Stops at first match."""
     import fitz  # PyMuPDF  (lazy import; cached after first call)
 
-    with fitz.open(str(pdf_path)) as doc:
-        page_limit = 1 if cfg.first_page_only else len(doc)
-        for page_index in range(page_limit):
-            page = doc[page_index]
-            rect = page.rect
+    # Suppress noisy MuPDF error/warning output for malformed PDFs.
+    if not cfg.verbose:
+        fitz.TOOLS.mupdf_display_errors(False)
 
-            # Bottom-right ROI.
-            x0 = rect.x0 + rect.width * cfg.roi_x
-            y0 = rect.y0 + rect.height * cfg.roi_y
-            x1 = x0 + rect.width * cfg.roi_w
-            y1 = y0 + rect.height * cfg.roi_h
-            roi = fitz.Rect(x0, y0, x1, y1) & rect
-            if roi.is_empty:
-                continue
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            page_limit = 1 if cfg.first_page_only else len(doc)
+            for page_index in range(page_limit):
+                try:
+                    page = doc[page_index]
+                    rect = page.rect
 
-            text = page.get_text("text", clip=roi)
-            case_id = find_case_id(text)
-            if case_id:
-                return DetectionResult(True, case_id, page_index + 1)
+                    # Bottom-right ROI.
+                    x0 = rect.x0 + rect.width * cfg.roi_x
+                    y0 = rect.y0 + rect.height * cfg.roi_y
+                    x1 = x0 + rect.width * cfg.roi_w
+                    y1 = y0 + rect.height * cfg.roi_h
+                    roi = fitz.Rect(x0, y0, x1, y1) & rect
+                    if roi.is_empty:
+                        continue
+
+                    text = page.get_text("text", clip=roi)
+                    case_id = find_case_id(text)
+                    if case_id:
+                        return DetectionResult(True, case_id, page_index + 1)
+                except Exception:
+                    # Skip pages that cannot be read (malformed page objects, etc.)
+                    continue
+    finally:
+        if not cfg.verbose:
+            fitz.TOOLS.mupdf_display_errors(True)
 
     return DetectionResult(False, "", -1)
 
@@ -158,6 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-h", type=float, default=0.30, help="Bottom-right ROI height ratio (0-1)")
     parser.add_argument("--first-page-only", action="store_true", help="Only check the first page of each PDF (faster)")
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers (default: 1, use 0 for all CPUs)")
+    parser.add_argument("--verbose", action="store_true", help="Show MuPDF warnings for malformed PDFs")
     return parser
 
 
@@ -190,6 +204,7 @@ def main() -> None:
         dry_run=args.dry_run,
         first_page_only=args.first_page_only,
         workers=workers,
+        verbose=args.verbose,
     )
 
     skip_parts = {cfg.output_root_dir_name, cfg.epstein_dir_name, cfg.user_dir_name}
