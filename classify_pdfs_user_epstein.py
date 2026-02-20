@@ -6,30 +6,36 @@ Rule:
 - Otherwise -> `user`
 
 Detection uses PDF text-layer extraction from the bottom-right ROI via PyMuPDF.
+Optimized for large-scale processing (100 GB+) with multiprocessing support.
 
 Examples:
     python3 classify_pdfs_user_epstein.py /path/to/pdfs --dry-run
-    python3 classify_pdfs_user_epstein.py /path/to/pdfs --recursive
+    python3 classify_pdfs_user_epstein.py /path/to/pdfs --recursive --workers 8
+    python3 classify_pdfs_user_epstein.py /path/to/pdfs --first-page-only
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import shutil
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-# Case-id patterns for Epstein-related documents.
-CASE_ID_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\bEFTA\d{8}\b", re.IGNORECASE),
-    re.compile(r"\b\d{1,2}:\d{2}-cv-\d{3,7}\b", re.IGNORECASE),
-    re.compile(r"\bCase\s+\d{1,2}:\d{2}-cv-\d{3,7}\b", re.IGNORECASE),
-    re.compile(r"\bCase\s*(No\.?|#)?\s*\d{1,2}:\d{2}-cv-\d{3,7}\b", re.IGNORECASE),
-    re.compile(r"\bNo\.?\s*\d{1,2}:\d{2}-cv-\d{3,7}\b", re.IGNORECASE),
-]
+# Single combined regex for all case-id variants (one-pass matching).
+# - EFTA-like IDs: 2-6 uppercase letters followed by 6-12 digits (e.g. EFTA00037815)
+# - Court case numbers: e.g. 1:15-cv-07433, Case No. 1:15-cv-07433
+CASE_ID_RE: re.Pattern[str] = re.compile(
+    r"\b[A-Z]{2,6}\d{6,12}\b"
+    r"|\bCase\s*(No\.?|#)?\s*\d{1,2}:\d{2}-cv-\d{3,7}\b"
+    r"|\bNo\.?\s*\d{1,2}:\d{2}-cv-\d{3,7}\b"
+    r"|\b\d{1,2}:\d{2}-cv-\d{3,7}\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -52,6 +58,8 @@ class Config:
     roi_h: float
     recursive: bool
     dry_run: bool
+    first_page_only: bool
+    workers: int
 
 
 def unique_destination(path: Path) -> Path:
@@ -74,48 +82,30 @@ def iter_pdf_files(input_dir: Path, recursive: bool) -> Iterable[Path]:
 
 
 def find_case_id(text: str) -> str:
-    for pattern in CASE_ID_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return match.group(0)
-    return ""
+    m = CASE_ID_RE.search(text)
+    return m.group(0) if m else ""
 
 
 def detect_case_id(pdf_path: Path, cfg: Config) -> DetectionResult:
-    """Detect case-id via text-layer extraction on all pages."""
-    try:
-        import fitz  # PyMuPDF
-    except Exception as exc:
-        raise RuntimeError("PyMuPDF is not installed") from exc
+    """Detect case-id via text-layer extraction. Stops at first match."""
+    import fitz  # PyMuPDF  (lazy import; cached after first call)
 
     with fitz.open(str(pdf_path)) as doc:
-        for page_index in range(len(doc)):
+        page_limit = 1 if cfg.first_page_only else len(doc)
+        for page_index in range(page_limit):
             page = doc[page_index]
-            page_rect = page.rect
+            rect = page.rect
 
-            # Bottom-right normalized ROI.
-            x0 = page_rect.x0 + page_rect.width * cfg.roi_x
-            y0 = page_rect.y0 + page_rect.height * cfg.roi_y
-            x1 = x0 + page_rect.width * cfg.roi_w
-            y1 = y0 + page_rect.height * cfg.roi_h
-            roi = fitz.Rect(x0, y0, x1, y1) & page_rect
+            # Bottom-right ROI.
+            x0 = rect.x0 + rect.width * cfg.roi_x
+            y0 = rect.y0 + rect.height * cfg.roi_y
+            x1 = x0 + rect.width * cfg.roi_w
+            y1 = y0 + rect.height * cfg.roi_h
+            roi = fitz.Rect(x0, y0, x1, y1) & rect
             if roi.is_empty:
                 continue
 
-            # Word-based extraction for better control over region text order.
-            # Each word tuple: (x0, y0, x1, y1, token, block, line, word).
-            roi_words = sorted(
-                (
-                    (wy0, wx0, token)
-                    for wx0, wy0, wx1, wy1, token, *_ in page.get_text("words")
-                    if not (wx1 < roi.x0 or wx0 > roi.x1 or wy1 < roi.y0 or wy0 > roi.y1)
-                ),
-                key=lambda t: (t[0], t[1]),
-            )
-            text = " ".join(token for _, _, token in roi_words).strip()
-            if not text:
-                text = page.get_text("text", clip=roi)
-
+            text = page.get_text("text", clip=roi)
             case_id = find_case_id(text)
             if case_id:
                 return DetectionResult(True, case_id, page_index + 1)
@@ -123,7 +113,9 @@ def detect_case_id(pdf_path: Path, cfg: Config) -> DetectionResult:
     return DetectionResult(False, "", -1)
 
 
-def classify_and_copy(pdf_path: Path, cfg: Config) -> tuple[str, str, int, str]:
+def _process_one(args: tuple[Path, Config]) -> tuple[str, str, int, str]:
+    """Worker function for multiprocessing: detect + copy a single PDF."""
+    pdf_path, cfg = args
     result = detect_case_id(pdf_path, cfg)
     group = cfg.epstein_dir_name if result.is_epstein else cfg.user_dir_name
 
@@ -164,6 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-y", type=float, default=0.70, help="Bottom-right ROI start y (0-1)")
     parser.add_argument("--roi-w", type=float, default=0.48, help="Bottom-right ROI width ratio (0-1)")
     parser.add_argument("--roi-h", type=float, default=0.30, help="Bottom-right ROI height ratio (0-1)")
+    parser.add_argument("--first-page-only", action="store_true", help="Only check the first page of each PDF (faster)")
+    parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers (default: 1, use 0 for all CPUs)")
     return parser
 
 
@@ -178,6 +172,10 @@ def main() -> None:
     if not report_csv.is_absolute():
         report_csv = input_dir / report_csv
 
+    workers = max(args.workers, 0)
+    if workers == 0:
+        workers = os.cpu_count() or 1
+
     cfg = Config(
         input_dir=input_dir,
         output_root_dir_name=args.output_root,
@@ -190,28 +188,42 @@ def main() -> None:
         roi_h=args.roi_h,
         recursive=args.recursive,
         dry_run=args.dry_run,
+        first_page_only=args.first_page_only,
+        workers=workers,
     )
 
-    pdf_files = sorted(iter_pdf_files(cfg.input_dir, cfg.recursive))
+    skip_parts = {cfg.output_root_dir_name, cfg.epstein_dir_name, cfg.user_dir_name}
+    pdf_files = sorted(
+        p for p in iter_pdf_files(cfg.input_dir, cfg.recursive)
+        if not cfg.recursive or not skip_parts.intersection(p.parts)
+    )
     if not pdf_files:
         print("No PDF files found.")
         return
 
-    rows: list[tuple[str, str, int, str]] = []
-    for pdf_path in pdf_files:
-        # Skip already-grouped files in recursive mode.
-        if cfg.recursive and any(
-            part in {cfg.output_root_dir_name, cfg.epstein_dir_name, cfg.user_dir_name}
-            for part in pdf_path.parts
-        ):
-            continue
+    print(f"Processing {len(pdf_files)} PDF(s) with {workers} worker(s)...")
 
-        try:
-            row = classify_and_copy(pdf_path, cfg)
-        except Exception as exc:
-            print(f"ERROR: {pdf_path.name}: {exc}")
-            row = (pdf_path.name, "error", -1, str(exc))
-        rows.append(row)
+    rows: list[tuple[str, str, int, str]] = []
+    if workers == 1:
+        for pdf_path in pdf_files:
+            try:
+                rows.append(_process_one((pdf_path, cfg)))
+            except Exception as exc:
+                print(f"ERROR: {pdf_path.name}: {exc}")
+                rows.append((pdf_path.name, "error", -1, str(exc)))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_process_one, (pdf_path, cfg)): pdf_path
+                for pdf_path in pdf_files
+            }
+            for future in as_completed(futures):
+                pdf_path = futures[future]
+                try:
+                    rows.append(future.result())
+                except Exception as exc:
+                    print(f"ERROR: {pdf_path.name}: {exc}")
+                    rows.append((pdf_path.name, "error", -1, str(exc)))
 
     write_report(rows, cfg.report_csv)
     print(f"\nDone. Processed {len(rows)} PDF file(s).")
